@@ -495,12 +495,82 @@ function GuidedChat() {
             setPhase("askMore");
           }, 400);
         } else {
-          addBot("Se descartarán los datos de este equipo. Ingrese nuevamente.");
+          // Try to detect if user is giving a correction directly
+          addBot("¿Qué dato desea corregir? Puede indicarlo directamente, por ejemplo:\n• \"La marca es DRAGER\"\n• \"Modelo WATOEX65\"\n• \"Riesgo funcionamiento 3\"\n\nO diga **\"repetir todo\"** para capturar este equipo desde el inicio.");
+          setPhase("correcting");
+        }
+        setBusy(false);
+        return;
+      }
+
+      // ── CORRECTING A FIELD ──
+      if (phase === "correcting") {
+        const lower = text.toLowerCase();
+        if (lower.includes("repetir") || lower.includes("reiniciar") || lower.includes("desde el inicio")) {
           setEquip({});
           setBlockIdx(0);
           setPhase("equip");
+          addBot("Se descartarán los datos. Ingrese el equipo nuevamente.");
           setTimeout(() => addBot(EQUIP_BLOCKS[0].ask), 400);
+          setBusy(false);
+          return;
         }
+
+        // Use Claude to figure out which field the user wants to correct
+        const correctionPrompt = `El usuario quiere corregir un dato de un equipo médico. Identifica qué campo quiere cambiar y cuál es el nuevo valor.
+
+Campos posibles y sus claves JSON:
+- ubicacion: ubicación/quirófano/sala
+- tipoEquipo: tipo de equipo
+- marca: marca del equipo
+- modelo: modelo
+- numSerie: número de serie
+- anioManufactura: año de manufactura
+- anioInstalacion: año de instalación
+- propiedad: propiedad/propietario
+- riesgoCaract: riesgo características/riesgo físico (0-5)
+- riesgoFunc: riesgo funcionamiento (0-5)
+- fechaServicio: fecha último servicio
+- proveedor: proveedor de servicio
+- accesorios: accesorios
+- observaciones: observaciones
+
+Para campos con catálogo, normaliza:
+- ubicacion: [${CAT_UBICACION.join(", ")}]
+- tipoEquipo: [${CAT_TIPO.join(", ")}]
+- marca: [${CAT_MARCA.join(", ")}]
+- propiedad: [${CAT_PROPIEDAD.join(", ")}]
+- proveedor: [${CAT_PROVEEDOR.join(", ")}]
+
+Responde SOLO con JSON: {"campo":"clave_del_campo","valor":"NUEVO VALOR"}
+Si no puedes identificar el campo, responde: {"campo":"","valor":""}`;
+
+        const res = await askClaude(correctionPrompt, text);
+        try {
+          const clean = res.replace(/```json|```/g, "").trim();
+          const match = clean.match(/\{[\s\S]*\}/);
+          if (match) {
+            const parsed = JSON.parse(match[0]);
+            if (parsed.campo && parsed.valor) {
+              const labels = {
+                ubicacion:"Ubicación", tipoEquipo:"Tipo", marca:"Marca", modelo:"Modelo",
+                numSerie:"No. Serie", anioManufactura:"Año Mfg", anioInstalacion:"Año Inst",
+                propiedad:"Propiedad", proveedor:"Proveedor",
+                riesgoCaract:"Riesgo Caract", riesgoFunc:"Riesgo Func", fechaServicio:"Últ. Servicio",
+                accesorios:"Accesorios", observaciones:"Observaciones"
+              };
+              const updated = { ...equip, [parsed.campo]: parsed.valor };
+              setEquip(updated);
+              addBot(`${labels[parsed.campo] || parsed.campo} actualizado a: **${parsed.valor}**\n\n` +
+                equipSummary(updated) + "\n\n¿Confirma los datos? (o indique otra corrección)");
+              setPhase("confirmEquip");
+              setBusy(false);
+              return;
+            }
+          }
+        } catch (e) { /* fall through */ }
+
+        addBot("No logré identificar la corrección. Indique el campo y valor, por ejemplo: \"La marca es DRAGER\"");
         setBusy(false);
         return;
       }
@@ -529,11 +599,10 @@ function GuidedChat() {
       if (phase === "askLocation") {
         if (isYes(text)) {
           setEquip({ ubicacion: lastUbi });
-          addBot(`**${lastUbi}** ✓`);
-          // Block 0 has ubicacion, so we modify block 0 ask to skip it
+          addBot(`**${lastUbi}**`);
           setBlockIdx(0);
           setPhase("equipSkipUbi");
-          setTimeout(() => addBot("**Tipo de equipo y marca:**"), 400);
+          setTimeout(() => addBot("Indique tipo de equipo y marca."), 400);
         } else {
           setEquip({});
           setBlockIdx(0);
