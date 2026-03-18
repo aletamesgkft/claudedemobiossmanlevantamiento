@@ -219,7 +219,7 @@ function calcMetrics(data) {
 // ── API ──
 async function askClaude(sys, msg) {
   try {
-    const r = await fetch("/api/claude", {
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -249,106 +249,171 @@ const cs = {
   btn2: { background: "#fff", color: "#6B7280", border: "1px solid #D1D5DB", borderRadius: 8, padding: "7px 14px", fontSize: 12, cursor: "pointer", fontFamily: FN },
 };
 
-
-// ── TAB 1: GUIDED VOICE CHAT (block-based) ──
+// ── TAB 1: GUIDED VOICE CHAT ──
 const RISK_LABELS = {
-  "0": "Completamente Operativo", "1": "Operativo con limitaciones",
-  "2": "Operativo no adecuado", "3": "Semi funcional",
-  "4": "No funcional", "5": "No apto"
+  "0":"Completamente Operativo","1":"Operativo con limitaciones",
+  "2":"Operativo no adecuado","3":"Semi funcional",
+  "4":"No funcional","5":"No apto"
 };
 
-const HEADER_BLOCK = {
-  ask: "Indique el hospital y el nombre del responsable del levantamiento.",
-  keys: ["idHospital", "nombre", "apPaterno", "apMaterno"],
-  extractPrompt: `Eres un asistente de captura de datos hospitalarios en México. El usuario puede hablar por voz (con errores de dictado) o escribir informalmente.
-
-CAMPOS A EXTRAER (JSON puro sin backticks):
-- idHospital: ID numérico o nombre/siglas del hospital
-- nombre: nombre(s) de pila del responsable
-- apPaterno: apellido paterno del responsable
-- apMaterno: apellido materno del responsable (puede quedar vacío)
-
-INSTITUCIONES COMUNES (corrige errores de voz):
-- "serena/sedena/Selena" → "SEDENA"
-- "imss/ims" → "IMSS"
-- "issste/iste" → "ISSSTE"
-- "angeles/ángeles" → "ANGELES"
-- "bienestar" → "IMSS BIENESTAR"
-
-EJEMPLOS:
-- "Serena Alejandro Tamez González" → {"idHospital":"SEDENA","nombre":"ALEJANDRO","apPaterno":"TAMEZ","apMaterno":"GONZÁLEZ"}
-- "Sedena yo soy el responsable soy alejandro Tamez González" → {"idHospital":"SEDENA","nombre":"ALEJANDRO","apPaterno":"TAMEZ","apMaterno":"GONZÁLEZ"}
-- "hospital 1596 el responsable es María López" → {"idHospital":"1596","nombre":"MARÍA","apPaterno":"LÓPEZ","apMaterno":""}
-- "yo soy Pedro Ruiz" → {"idHospital":"","nombre":"PEDRO","apPaterno":"RUIZ","apMaterno":""}
-- "1596, Nestor Tobias Galvez Montes" → {"idHospital":"1596","nombre":"NESTOR TOBIAS","apPaterno":"GALVEZ","apMaterno":"MONTES"}
-
-REGLAS:
-- Extrae TODO lo que puedas inferir, aunque esté desordenado o informal
-- CORRIGE errores obvios de reconocimiento de voz (serena→SEDENA, etc.)
-- Los nombres van en MAYÚSCULAS
-- Si la primera palabra parece institución/hospital seguida de un nombre de persona, separa correctamente
-- Si solo da un dato, extrae ese y deja los demás vacíos ""
-- Si dice "soy [nombre]", infiere que es el responsable
-- SIEMPRE devuelve JSON válido
-- JSON puro, sin explicaciones, sin backticks.`
+const FIELD_LABELS = {
+  idHospital:"Hospital", nombre:"Nombre", apPaterno:"Ap. Paterno", apMaterno:"Ap. Materno",
+  ubicacion:"Ubicación", tipoEquipo:"Tipo", marca:"Marca", modelo:"Modelo",
+  numSerie:"No. Serie", anioManufactura:"Año Manufactura", anioInstalacion:"Año Instalación",
+  propiedad:"Propiedad", proveedor:"Proveedor",
+  riesgoCaract:"Riesgo Características", riesgoFunc:"Riesgo Funcionamiento",
+  fechaServicio:"Últ. Servicio", accesorios:"Accesorios", observaciones:"Observaciones"
 };
 
-const EQUIP_BLOCKS = [
-  {
-    id: "block1",
-    ask: "Indique ubicación, tipo de equipo y marca.",
-    keys: ["ubicacion", "tipoEquipo", "marca"],
-    extractPrompt: `Eres un asistente de captura de equipos médicos hospitalarios. El usuario habla de forma natural, posiblemente por voz. Extrae del texto estos campos como JSON puro sin backticks:
-- ubicacion: normaliza a uno de [${CAT_UBICACION.join(", ")}]. Ej: "quirofano uno"→"QUIRÓFANO 1", "sala uno"→"SALA 1", "expulsión"→"EXPULSIÓN"
-- tipoEquipo: normaliza a uno de [${CAT_TIPO.join(", ")}]. Ej: "cauterio/electrocauterizador"→"ELECTROCAUTERIO", "mesa de operaciones"→"MESA QUIRÚRGICA", "lampara"→"LÁMPARA QUIRÚRGICA", "monitor"→"MONITOR DE SIGNOS VITALES", "maquina de anestesia"→"MÁQUINA DE ANESTESIA", "aspirador portátil"→"ASPIRADOR", "succión/succionador"→"SUCCIÓN"
-- marca: normaliza a uno de [${CAT_MARCA.join(", ")}]. Ej: "drager/dräger"→"DRAGER", "biosman"→"BIOSSMANN", "conmed aspen"→"CONMED"
-Si algo no coincide con el catálogo, pon "OTRO". Si un campo no se menciona, pon "". JSON puro.`
-  },
-  {
-    id: "block2",
-    ask: "Indique modelo, número de serie y año de manufactura.",
-    keys: ["modelo", "numSerie", "anioManufactura"],
-    extractPrompt: `Eres un asistente de captura de equipos médicos. El usuario habla de forma natural. Extrae como JSON puro sin backticks:
-- modelo: texto del modelo del equipo
-- numSerie: número o código de serie
-- anioManufactura: año en formato YYYY. Si dice "dos mil veintitrés"→"2023"
-Si dice "no sé" o "sin dato" para algún campo, pon "". JSON puro.`
-  },
-  {
-    id: "block3",
-    ask: "Indique año de instalación, propiedad y proveedor de servicio.",
-    keys: ["anioInstalacion", "propiedad", "proveedor"],
-    extractPrompt: `Eres un asistente de captura de equipos médicos. Extrae como JSON puro sin backticks:
-- anioInstalacion: año YYYY
-- propiedad: normaliza a uno de [${CAT_PROPIEDAD.join(", ")}]. "del hospital/propio/es del hospital"→"HOSPITAL", "de biossmann"→"BIOSSMANN", "no sé/desconocido"→"OTRO"
-- proveedor: normaliza a uno de [${CAT_PROVEEDOR.join(", ")}]. Normaliza errores ortográficos. "no sé/sin dato"→""
-Si no coincide con catálogo pon "OTRO". JSON puro.`
-  },
-  {
-    id: "block4",
-    ask: "Riesgo por características físicas (0-5), riesgo por funcionamiento (0-5) y fecha del último servicio.\n\nEscala: 0=Operativo, 1=Con limitaciones, 2=No adecuado, 3=Semi funcional, 4=No funcional, 5=No apto",
-    keys: ["riesgoCaract", "riesgoFunc", "fechaServicio"],
-    extractPrompt: `Eres un asistente de captura. El usuario indica niveles de riesgo y una fecha. Extrae como JSON puro sin backticks:
-- riesgoCaract: número 0-5. Si dice "cero"→"0", "funciona bien"→"0", "tiene problemas"→"3", "no sirve"→"4"
-- riesgoFunc: número 0-5. Misma lógica.
-- fechaServicio: fecha en YYYY-MM-DD. "octubre 2025"→"2025-10-01", "hace 6 meses"→calcular aprox, "no sé/nunca"→""
-Si dice dos números seguidos como "cero y cero" o "0 0", el primero es riesgoCaract y el segundo riesgoFunc.
-JSON puro.`
-  },
-  {
-    id: "block5",
-    ask: "Accesorios presentes y observaciones adicionales.",
-    keys: ["accesorios", "observaciones"],
-    extractPrompt: `Eres un asistente de captura. Extrae como JSON puro sin backticks:
-- accesorios: descripción de accesorios presentes. "ninguno/nada/no tiene"→""
-- observaciones: notas adicionales sobre el equipo. "ninguna/nada/todo bien"→""
-Si el usuario dice algo como "funciona bien, tiene todos sus cables", separa: accesorios="CABLES COMPLETOS", observaciones="FUNCIONAL".
-JSON puro.`
-  }
+const EQUIP_FIELDS = ["ubicacion","tipoEquipo","marca","modelo","numSerie","anioManufactura","anioInstalacion","propiedad","riesgoCaract","riesgoFunc","fechaServicio","proveedor","accesorios","observaciones"];
+
+const BLOCKS = [
+  { ask: "Indique ubicación, tipo de equipo y marca.", fields: ["ubicacion","tipoEquipo","marca"] },
+  { ask: "Indique modelo, número de serie y año de manufactura.", fields: ["modelo","numSerie","anioManufactura"] },
+  { ask: "Indique año de instalación, propiedad y proveedor de servicio.", fields: ["anioInstalacion","propiedad","proveedor"] },
+  { ask: "RISK_TABLE", fields: ["riesgoCaract","riesgoFunc","fechaServicio"] },
+  { ask: "Accesorios presentes y observaciones adicionales.", fields: ["accesorios","observaciones"] },
 ];
 
+const RISK_TABLE_MSG = "Indique dos valores de riesgo y la fecha del último servicio:\n1) **Riesgo por características físicas** (estado físico del equipo)\n2) **Riesgo por funcionamiento** (desempeño operativo)\n3) **Fecha del último servicio**";
+
+function RiskTable() {
+  const rows = [
+    { n: "0", label: "Completamente Operativo", desc: "Funciona adecuadamente, accesorios completos, acorde a necesidades.", color: "#4CAF50" },
+    { n: "1", label: "Operativo con limitaciones", desc: "Funciona adecuadamente pero accesorios incompletos o inadecuados.", color: "#8BC34A" },
+    { n: "2", label: "Operativo no adecuado", desc: "Funciona correctamente pero no es adecuado para la unidad médica.", color: "#FFC107" },
+    { n: "3", label: "Semi funcional", desc: "Parcialmente funcional. Deficiencias estructurales que comprometen operación.", color: "#FF9800" },
+    { n: "4", label: "No funcional", desc: "Equipo con daño que impide totalmente su uso.", color: "#F44336" },
+    { n: "5", label: "No apto", desc: "Tecnológicamente obsoleto. No funcional. Sin medidas de seguridad.", color: "#B71C1C" },
+  ];
+  return (
+    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, marginTop: 8, marginBottom: 8 }}>
+      <thead>
+        <tr style={{ background: "#F0F2F5" }}>
+          <th style={{ padding: "4px 6px", textAlign: "center", borderBottom: "1px solid #D1D5DB", width: 30 }}>Escala</th>
+          <th style={{ padding: "4px 6px", textAlign: "left", borderBottom: "1px solid #D1D5DB" }}>Estado General</th>
+          <th style={{ padding: "4px 6px", textAlign: "left", borderBottom: "1px solid #D1D5DB" }}>Descripción</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map(r => (
+          <tr key={r.n} style={{ borderBottom: "1px solid #E8EAED" }}>
+            <td style={{ padding: "4px 6px", textAlign: "center", fontWeight: 700 }}>{r.n}</td>
+            <td style={{ padding: "4px 6px", fontWeight: 600, color: r.color }}>{r.label}</td>
+            <td style={{ padding: "4px 6px", color: "#6B7280", fontSize: 10 }}>{r.desc}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+// Single unified prompt - Claude handles extraction AND corrections in one call
+function buildPrompt(phase, blockIdx, header, equip) {
+  const catalogInfo = `
+CATÁLOGOS (normalizar a estos valores exactos):
+- ubicacion: ${CAT_UBICACION.join(", ")}
+- tipoEquipo: ${CAT_TIPO.join(", ")}
+- marca: ${CAT_MARCA.join(", ")}
+- propiedad: ${CAT_PROPIEDAD.join(", ")}
+- proveedor: ${CAT_PROVEEDOR.join(", ")}
+- riesgoCaract/riesgoFunc: 0,1,2,3,4,5
+
+NORMALIZACIÓN VOZ (errores comunes de dictado):
+- "serena/selena" → SEDENA, "imss/ims" → IMSS, "iste/issste" → ISSSTE
+- "quirofano/quirófano uno/1" → QUIRÓFANO 1, "sala uno" → SALA 1
+- "electrocauterizador/cauterio/bisturí" → ELECTROCAUTERIO
+- "mesa de operaciones/mesa quirúrgica" → MESA QUIRÚRGICA
+- "lampara/lámparas quirúrgicas" → LÁMPARA QUIRÚRGICA
+- "monitor/monitor signos" → MONITOR DE SIGNOS VITALES
+- "maquina anestesia" → MÁQUINA DE ANESTESIA
+- "aspirador portátil/portable" → ASPIRADOR
+- "succión/succionador" → SUCCIÓN
+- "drager/dräger/dragger" → DRAGER, "biosman/biossmann" → BIOSSMANN
+- "stryker/strynker" → STRYKER, "conmed aspen" → CONMED
+- "del hospital/propio" → HOSPITAL, "bismarck" → probablemente BIOSSMANN`;
+
+  if (phase === "header") {
+    return `Eres un asistente de captura de datos hospitalarios en México. El usuario habla por voz o texto informal.
+
+${catalogInfo}
+
+ESTADO ACTUAL DEL ENCABEZADO:
+${JSON.stringify(header)}
+
+CAMPOS QUE NECESITO: idHospital, nombre, apPaterno, apMaterno
+
+El usuario puede dar todos los datos juntos o solo algunos. También puede corregir datos ya capturados.
+
+RESPONDE SOLO con JSON (sin backticks):
+{
+  "updates": {"campo1":"valor1", "campo2":"valor2"},
+  "message": "breve confirmación de lo que se capturó"
+}
+
+REGLAS:
+- Extrae TODO lo que puedas del texto
+- Nombres en MAYÚSCULAS
+- Si dice "soy Alejandro Tamez González" → nombre=ALEJANDRO, apPaterno=TAMEZ, apMaterno=GONZÁLEZ
+- Si la primera palabra es una institución (Sedena, IMSS, etc) seguida de un nombre → separa hospital y responsable
+- Si corrige algo ("el hospital es X", "no, mi nombre es Y") → actualiza ese campo
+- Solo incluye en updates los campos que el usuario mencionó
+- message debe ser breve y formal`;
+  }
+
+  const block = BLOCKS[blockIdx] || BLOCKS[0];
+  const pendingFields = block.fields.filter(f => !equip[f]);
+
+  return `Eres un asistente de captura de equipos médicos. El usuario habla por voz o texto informal.
+
+${catalogInfo}
+
+ENCABEZADO YA CAPTURADO:
+${JSON.stringify(header)}
+
+EQUIPO EN CAPTURA (datos hasta ahora):
+${JSON.stringify(equip)}
+
+CAMPOS SOLICITADOS EN ESTE BLOQUE: ${block.fields.join(", ")}
+CAMPOS AÚN PENDIENTES EN ESTE BLOQUE: ${pendingFields.join(", ")}
+
+El usuario puede:
+A) Dar los datos del bloque actual (${pendingFields.join(", ")})
+B) Corregir cualquier dato ya capturado del equipo o del encabezado
+C) Ambos: dar datos nuevos Y corregir algo
+
+RESPONDE SOLO con JSON (sin backticks):
+{
+  "blockData": {"campo1":"valor1"},
+  "corrections": {"campo1":"valor1"},
+  "correctionsTarget": "equip" | "header",
+  "message": "breve confirmación"
+}
+
+REGLAS:
+- blockData: campos del bloque actual que el usuario proporcionó. Solo campos de [${block.fields.join(",")}]
+- corrections: campos que el usuario corrige de datos PREVIOS (no del bloque actual). Puede ser vacío {}
+- correctionsTarget: "header" si corrige hospital/nombre/apellidos, "equip" si corrige otros campos del equipo
+- Si dice "quirófano 1 es para anestesia marca biossmann" → blockData: {ubicacion:"QUIRÓFANO 1", tipoEquipo:"MÁQUINA DE ANESTESIA", marca:"BIOSSMANN"}
+- Si dice "el hospital es sedena" y eso no es un campo del bloque actual → corrections: {idHospital:"SEDENA"}, correctionsTarget:"header"
+- Si dice "ya te dije ubicaciones quirófano es para anestesia marca biossmann" → interpreta: ubicacion=QUIRÓFANO (normalizar), tipoEquipo=MÁQUINA DE ANESTESIA, marca=BIOSSMANN
+- Valores vacíos/no mencionados NO incluir en blockData ni corrections
+- "no sé" / "sin dato" / "ninguno" para un campo → valor ""
+- message: confirma brevemente qué se capturó, formal y corto
+
+REGLA ESPECIAL PARA RIESGOS (cuando los campos son riesgoCaract, riesgoFunc, fechaServicio):
+- riesgoCaract y riesgoFunc son DOS campos SEPARADOS, ambos obligatorios (0-5)
+- riesgoCaract = riesgo por CARACTERÍSTICAS FÍSICAS del equipo (estado físico, accesorios)
+- riesgoFunc = riesgo por FUNCIONAMIENTO del equipo (desempeño operativo)
+- Si dice "cero y cero" o "0 0" → riesgoCaract:"0", riesgoFunc:"0"
+- Si dice "funciona bien" → riesgoCaract:"0", riesgoFunc:"0"
+- Si dice "no funciona" → riesgoCaract:"4", riesgoFunc:"4"
+- Si dice "3 y 2" → riesgoCaract:"3", riesgoFunc:"2"
+- Si solo da UN número, asigna ESE número a AMBOS campos
+- SIEMPRE incluir ambos campos cuando este bloque está activo`;
+}
+
 function GuidedChat() {
-  // Phases: idle → header → equip → confirmEquip → askMore → askLocation → equip → ... → finalReview → sent
   const [phase, setPhase] = useState("idle");
   const [msgs, setMsgs] = useState([]);
   const [input, setInput] = useState("");
@@ -364,22 +429,46 @@ function GuidedChat() {
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [msgs]);
 
-  const addBot = (text) => setMsgs((p) => [...p, { from: "bot", text }]);
-  const addUser = (text) => setMsgs((p) => [...p, { from: "user", text }]);
+  const addBot = (text) => setMsgs(p => [...p, { from: "bot", text }]);
+  const addUser = (text) => setMsgs(p => [...p, { from: "user", text }]);
+
+  const formatFields = (fields) => {
+    return Object.entries(fields).filter(([k,v]) => v).map(([k,v]) => {
+      const label = FIELD_LABELS[k] || k;
+      const display = (k === "riesgoCaract" || k === "riesgoFunc") ? `${v} (${RISK_LABELS[v]||""})` : v;
+      return `${label}: **${display}**`;
+    }).join("\n");
+  };
+
+  const equipSummary = (eq) => {
+    return "**Resumen del equipo:**\n" + EQUIP_FIELDS.map(k => {
+      const v = eq[k] || "—";
+      const display = (k === "riesgoCaract" || k === "riesgoFunc") ? `${v} (${RISK_LABELS[v]||""})` : v;
+      return `${FIELD_LABELS[k]}: ${display}`;
+    }).join("\n");
+  };
+
+  const finalSummary = (eqs) => {
+    let t = `**Resumen del Levantamiento**\n\n`;
+    t += `Fecha: ${header.fecha||"—"} | Hospital: ${header.idHospital||"—"} | Responsable: ${header.nombre||""} ${header.apPaterno||""} ${header.apMaterno||""}\n\n`;
+    t += `**${eqs.length} equipo(s):**\n\n`;
+    eqs.forEach((eq, i) => {
+      t += `**${i+1}.** ${eq.tipoEquipo||"?"} — ${eq.marca||"?"} ${eq.modelo||""} (${eq.ubicacion||"?"})\n`;
+    });
+    t += `\n¿Confirma el envío?`;
+    return t;
+  };
+
+  const isYes = (t) => { const l = t.toLowerCase().trim(); return l==="s"||l==="si"||l==="sí"||l.includes("correcto")||l.includes("ok")||l==="yes"||l.includes("confirmo"); };
+  const isNo = (t) => { const l = t.toLowerCase().trim(); return l==="n"||l==="no"||l.includes("negativo")||l.includes("incorrecto"); };
 
   // ── Start ──
   const startNew = () => {
-    setMsgs([]);
+    setMsgs([]); setEquip({}); setAllEquips([]); setLastUbi(""); setBlockIdx(0);
     const today = new Date().toISOString().split("T")[0];
     setHeader({ fecha: today });
-    setEquip({});
-    setAllEquips([]);
-    setLastUbi("");
-    setBlockIdx(0);
     setPhase("header");
-    setTimeout(() => {
-      addBot(`Fecha del levantamiento: **${today}**\n\n` + HEADER_BLOCK.ask);
-    }, 300);
+    setTimeout(() => addBot(`Fecha del levantamiento: **${today}**\n\nIndique el hospital y el nombre del responsable.`), 300);
   };
 
   // ── Voice ──
@@ -388,484 +477,308 @@ function GuidedChat() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) { addBot("Reconocimiento de voz no disponible en este navegador."); return; }
     try {
-      const rec = new SR();
-      rec.lang = "es-MX";
-      rec.continuous = false;
-      rec.interimResults = false;
-      rec.onresult = (e) => {
-        const t = e.results[0][0].transcript;
-        setInput(t);
-        setTimeout(() => processInput(t), 300);
-      };
+      const rec = new SR(); rec.lang = "es-MX"; rec.continuous = false; rec.interimResults = false;
+      rec.onresult = (e) => { const t = e.results[0][0].transcript; setInput(t); setTimeout(() => processInput(t), 300); };
       rec.onerror = () => setListening(false);
       rec.onend = () => setListening(false);
-      recRef.current = rec;
-      rec.start();
-      setListening(true);
-    } catch (e) { addBot("Error al iniciar reconocimiento de voz."); }
+      recRef.current = rec; rec.start(); setListening(true);
+    } catch (e) { /* skip */ }
   };
 
-  // ── Extract fields via Claude ──
-  const extractFields = async (text, prompt, keys) => {
-    const res = await askClaude(prompt, `Texto del usuario: "${text}"`);
+  // ── Parse Claude response ──
+  const parseJSON = (text) => {
     try {
-      const clean = res.replace(/```json|```/g, "").trim();
+      const clean = text.replace(/```json|```/g, "").trim();
       const match = clean.match(/\{[\s\S]*\}/);
-      if (match) {
-        const parsed = JSON.parse(match[0]);
-        const result = {};
-        keys.forEach((k) => {
-          if (parsed[k] !== undefined && parsed[k] !== null) result[k] = String(parsed[k]);
-        });
-        return result;
-      }
-    } catch (e) { /* fall through */ }
-    return null;
+      return match ? JSON.parse(match[0]) : null;
+    } catch { return null; }
   };
 
-  // ── Format extracted values for confirmation ──
-  const formatExtracted = (fields) => {
-    return Object.entries(fields).map(([k, v]) => {
-      if (!v) return null;
-      const labels = {
-        idHospital: "Hospital", nombre: "Nombre", apPaterno: "Ap. Paterno", apMaterno: "Ap. Materno",
-        ubicacion: "Ubicación", tipoEquipo: "Tipo", marca: "Marca", modelo: "Modelo",
-        numSerie: "No. Serie", anioManufactura: "Año Mfg", anioInstalacion: "Año Inst",
-        propiedad: "Propiedad", proveedor: "Proveedor",
-        riesgoCaract: "Riesgo Caract", riesgoFunc: "Riesgo Func", fechaServicio: "Últ. Servicio",
-        accesorios: "Accesorios", observaciones: "Observaciones"
-      };
-      const label = labels[k] || k;
-      const display = (k === "riesgoCaract" || k === "riesgoFunc") ? `${v} (${RISK_LABELS[v] || ""})` : v;
-      return `• ${label}: **${display}**`;
-    }).filter(Boolean).join("\n");
-  };
-
-  // ── Full equip summary ──
-  const equipSummary = (eq) => {
-    const lines = [
-      `• Ubicación: ${eq.ubicacion || "—"}`,
-      `• Tipo: ${eq.tipoEquipo || "—"}`,
-      `• Marca: ${eq.marca || "—"}`,
-      `• Modelo: ${eq.modelo || "—"}`,
-      `• No. Serie: ${eq.numSerie || "—"}`,
-      `• Año Mfg: ${eq.anioManufactura || "—"}`,
-      `• Año Inst: ${eq.anioInstalacion || "—"}`,
-      `• Propiedad: ${eq.propiedad || "—"}`,
-      `• Riesgo Caract: ${eq.riesgoCaract || "—"} (${RISK_LABELS[eq.riesgoCaract] || ""})`,
-      `• Riesgo Func: ${eq.riesgoFunc || "—"} (${RISK_LABELS[eq.riesgoFunc] || ""})`,
-      `• Últ. Servicio: ${eq.fechaServicio || "—"}`,
-      `• Proveedor: ${eq.proveedor || "—"}`,
-      `• Accesorios: ${eq.accesorios || "—"}`,
-      `• Observaciones: ${eq.observaciones || "—"}`
-    ];
-    return `**Resumen del equipo:**\n` + lines.join("\n");
-  };
-
-  // ── Final summary ──
-  const finalSummary = (eqs) => {
-    let t = `**Resumen del Levantamiento**\n\n`;
-    t += `• Fecha: ${header.fecha || "—"}\n`;
-    t += `• Hospital: ${header.idHospital || "—"}\n`;
-    t += `• Responsable: ${header.nombre || ""} ${header.apPaterno || ""} ${header.apMaterno || ""}\n\n`;
-    t += `**Equipos registrados: ${eqs.length}**\n\n`;
-    eqs.forEach((eq, i) => {
-      t += `**${i + 1}.** ${eq.tipoEquipo} — ${eq.marca} ${eq.modelo || ""} (${eq.ubicacion})\n`;
-      t += `   Serie: ${eq.numSerie || "—"} | Mfg: ${eq.anioManufactura || "—"} | Riesgo: ${eq.riesgoCaract}/${eq.riesgoFunc}\n\n`;
-    });
-    t += `¿Confirma el envío de este levantamiento?`;
-    return t;
-  };
-
-  const isYes = (t) => {
-    const l = t.toLowerCase().trim();
-    return l === "s" || l === "si" || l === "sí" || l.includes("correcto") || l.includes("ok") || l === "yes";
+  // ── Ask a block (handles risk table specially) ──
+  const askBlock = (idx) => {
+    const block = BLOCKS[idx];
+    if (block.ask === "RISK_TABLE") {
+      setMsgs(p => [...p, { from: "bot", text: RISK_TABLE_MSG, riskTable: true }]);
+    } else {
+      addBot(block.ask);
+    }
   };
 
   // ── Main processor ──
   const processInput = async (rawText) => {
     const text = (rawText || input).trim();
     if (!text || busy) return;
-    setInput("");
-    addUser(text);
-    setBusy(true);
+    setInput(""); addUser(text); setBusy(true);
 
     try {
-      // ── UNIVERSAL CORRECTION DETECTION ──
-      // Before any phase logic, check if user is correcting a previous field
-      const lowerText = text.toLowerCase();
-      const isCorrectionPattern = /^(el |la |los |las )?(hospital|nombre|apellido|marca|modelo|tipo|ubicaci|proveed|riesgo|serie|manufactura|instalaci|servicio|accesorios|observaci)/i.test(lowerText) 
-        || /^(corrig|cambia|actualiza|modifica|no,? (es|era|el|la))/i.test(lowerText)
-        || (lowerText.includes(" es ") && !isYes(text) && phase !== "header");
-
-      if (isCorrectionPattern && phase !== "header" && phase !== "idle") {
-        const correctionSys = `El usuario quiere corregir un dato previamente capturado. Identifica qué campo corregir y el nuevo valor.
-
-CAMPOS DEL ENCABEZADO (header):
-- idHospital: hospital/ID hospital/clínica/SEDENA/IMSS/etc
-- nombre: nombre del responsable
-- apPaterno: apellido paterno
-- apMaterno: apellido materno
-
-CAMPOS DEL EQUIPO:
-- ubicacion: ubicación/quirófano/sala → normaliza a [${CAT_UBICACION.join(", ")}]
-- tipoEquipo: tipo de equipo → normaliza a [${CAT_TIPO.join(", ")}]
-- marca: marca → normaliza a [${CAT_MARCA.join(", ")}]
-- modelo: modelo
-- numSerie: número de serie
-- anioManufactura: año manufactura
-- anioInstalacion: año instalación
-- propiedad: propiedad → normaliza a [${CAT_PROPIEDAD.join(", ")}]
-- riesgoCaract: riesgo características (0-5)
-- riesgoFunc: riesgo funcionamiento (0-5)
-- fechaServicio: fecha último servicio
-- proveedor: proveedor → normaliza a [${CAT_PROVEEDOR.join(", ")}]
-- accesorios: accesorios
-- observaciones: observaciones
-
-IMPORTANTE: 
-- "el hospital es sedena" → {"target":"header","campo":"idHospital","valor":"SEDENA"}
-- "la marca es drager" → {"target":"equip","campo":"marca","valor":"DRAGER"}
-- "corrige el nombre, soy Pedro" → {"target":"header","campo":"nombre","valor":"PEDRO"}
-
-Responde SOLO JSON: {"target":"header"|"equip","campo":"clave","valor":"VALOR"}
-Si NO es una corrección, responde: {"target":"none"}`;
-
-        const corrRes = await askClaude(correctionSys, text);
-        try {
-          const match = corrRes.replace(/```json|```/g, "").trim().match(/\{[\s\S]*\}/);
-          if (match) {
-            const parsed = JSON.parse(match[0]);
-            if (parsed.target === "header" && parsed.campo && parsed.valor) {
-              const labels = { idHospital:"Hospital", nombre:"Nombre", apPaterno:"Ap. Paterno", apMaterno:"Ap. Materno" };
-              setHeader(p => ({ ...p, [parsed.campo]: parsed.valor }));
-              addBot(`${labels[parsed.campo] || parsed.campo} actualizado: **${parsed.valor}**`);
-              // Stay in current phase, re-ask current question if in equip
-              if (phase === "equip" || phase === "equipSkipUbi") {
-                const block = EQUIP_BLOCKS[blockIdx];
-                setTimeout(() => addBot(block.ask), 400);
-              }
-              setBusy(false);
-              return;
-            }
-            if (parsed.target === "equip" && parsed.campo && parsed.valor) {
-              const labels = {
-                ubicacion:"Ubicación", tipoEquipo:"Tipo", marca:"Marca", modelo:"Modelo",
-                numSerie:"No. Serie", anioManufactura:"Año Mfg", anioInstalacion:"Año Inst",
-                propiedad:"Propiedad", proveedor:"Proveedor",
-                riesgoCaract:"Riesgo Caract", riesgoFunc:"Riesgo Func", fechaServicio:"Últ. Servicio",
-                accesorios:"Accesorios", observaciones:"Observaciones"
-              };
-              setEquip(p => ({ ...p, [parsed.campo]: parsed.valor }));
-              addBot(`${labels[parsed.campo] || parsed.campo} actualizado: **${parsed.valor}**`);
-              if (phase === "equip" || phase === "equipSkipUbi") {
-                const block = EQUIP_BLOCKS[blockIdx];
-                setTimeout(() => addBot(block.ask), 400);
-              } else if (phase === "confirmEquip") {
-                const updated = { ...equip, [parsed.campo]: parsed.valor };
-                setTimeout(() => addBot(equipSummary(updated) + "\n\n¿Confirma los datos?"), 400);
-              }
-              setBusy(false);
-              return;
-            }
-            // If target is "none", fall through to normal phase processing
-          }
-        } catch (e) { /* fall through to normal processing */ }
-      }
-      // ── CONFIRM EQUIP ──
+      // ── YES/NO phases ──
       if (phase === "confirmEquip") {
         if (isYes(text)) {
           const saved = { ...equip };
-          const newList = [...allEquips, saved];
-          setAllEquips(newList);
-          setLastUbi(saved.ubicacion);
-          addBot("Equipo registrado correctamente.");
-          setTimeout(() => {
-            addBot("¿Desea registrar otro equipo?");
-            setPhase("askMore");
-          }, 400);
-        } else {
-          // Try to detect if user is giving a correction directly
-          addBot("¿Qué dato desea corregir? Puede indicarlo directamente, por ejemplo:\n• \"La marca es DRAGER\"\n• \"Modelo WATOEX65\"\n• \"Riesgo funcionamiento 3\"\n\nO diga **\"repetir todo\"** para capturar este equipo desde el inicio.");
+          setAllEquips(p => [...p, saved]);
+          setLastUbi(saved.ubicacion || "");
+          addBot("Equipo registrado. ¿Desea registrar otro?");
+          setPhase("askMore");
+        } else if (isNo(text)) {
+          addBot("Indique qué dato corregir. Por ejemplo: \"la marca es DRAGER\"\nO diga **repetir todo** para reiniciar este equipo.");
           setPhase("correcting");
+        } else {
+          // Might be a direct correction like "la marca es drager"
+          setPhase("correcting");
+          // Process the same text as a correction
+          await handleCorrection(text);
         }
-        setBusy(false);
-        return;
+        setBusy(false); return;
       }
 
-      // ── CORRECTING A FIELD ──
       if (phase === "correcting") {
-        const lower = text.toLowerCase();
-        if (lower.includes("repetir") || lower.includes("reiniciar") || lower.includes("desde el inicio")) {
-          setEquip({});
-          setBlockIdx(0);
-          setPhase("equip");
-          addBot("Se descartarán los datos. Ingrese el equipo nuevamente.");
-          setTimeout(() => addBot(EQUIP_BLOCKS[0].ask), 400);
-          setBusy(false);
-          return;
-        }
-
-        // Use Claude to figure out which field the user wants to correct
-        const correctionPrompt = `El usuario quiere corregir un dato de un equipo médico. Identifica qué campo quiere cambiar y cuál es el nuevo valor.
-
-Campos posibles y sus claves JSON:
-- ubicacion: ubicación/quirófano/sala
-- tipoEquipo: tipo de equipo
-- marca: marca del equipo
-- modelo: modelo
-- numSerie: número de serie
-- anioManufactura: año de manufactura
-- anioInstalacion: año de instalación
-- propiedad: propiedad/propietario
-- riesgoCaract: riesgo características/riesgo físico (0-5)
-- riesgoFunc: riesgo funcionamiento (0-5)
-- fechaServicio: fecha último servicio
-- proveedor: proveedor de servicio
-- accesorios: accesorios
-- observaciones: observaciones
-
-Para campos con catálogo, normaliza:
-- ubicacion: [${CAT_UBICACION.join(", ")}]
-- tipoEquipo: [${CAT_TIPO.join(", ")}]
-- marca: [${CAT_MARCA.join(", ")}]
-- propiedad: [${CAT_PROPIEDAD.join(", ")}]
-- proveedor: [${CAT_PROVEEDOR.join(", ")}]
-
-Responde SOLO con JSON: {"campo":"clave_del_campo","valor":"NUEVO VALOR"}
-Si no puedes identificar el campo, responde: {"campo":"","valor":""}`;
-
-        const res = await askClaude(correctionPrompt, text);
-        try {
-          const clean = res.replace(/```json|```/g, "").trim();
-          const match = clean.match(/\{[\s\S]*\}/);
-          if (match) {
-            const parsed = JSON.parse(match[0]);
-            if (parsed.campo && parsed.valor) {
-              const labels = {
-                ubicacion:"Ubicación", tipoEquipo:"Tipo", marca:"Marca", modelo:"Modelo",
-                numSerie:"No. Serie", anioManufactura:"Año Mfg", anioInstalacion:"Año Inst",
-                propiedad:"Propiedad", proveedor:"Proveedor",
-                riesgoCaract:"Riesgo Caract", riesgoFunc:"Riesgo Func", fechaServicio:"Últ. Servicio",
-                accesorios:"Accesorios", observaciones:"Observaciones"
-              };
-              const updated = { ...equip, [parsed.campo]: parsed.valor };
-              setEquip(updated);
-              addBot(`${labels[parsed.campo] || parsed.campo} actualizado a: **${parsed.valor}**\n\n` +
-                equipSummary(updated) + "\n\n¿Confirma los datos? (o indique otra corrección)");
-              setPhase("confirmEquip");
-              setBusy(false);
-              return;
-            }
-          }
-        } catch (e) { /* fall through */ }
-
-        addBot("No logré identificar la corrección. Indique el campo y valor, por ejemplo: \"La marca es DRAGER\"");
-        setBusy(false);
-        return;
+        await handleCorrection(text);
+        setBusy(false); return;
       }
 
-      // ── ASK MORE ──
       if (phase === "askMore") {
         if (isYes(text)) {
-          setEquip({});
-          setBlockIdx(0);
+          setEquip({}); setBlockIdx(0);
           if (lastUbi) {
-            addBot(`¿Misma ubicación: ${lastUbi}?`);
+            addBot(`¿Misma ubicación: **${lastUbi}**?`);
             setPhase("askLocation");
           } else {
-            setPhase("equip");
-            setTimeout(() => addBot(EQUIP_BLOCKS[0].ask), 400);
+            setPhase("equip"); setTimeout(() => askBlock(0), 300);
           }
         } else {
           addBot(finalSummary(allEquips));
           setPhase("finalReview");
         }
-        setBusy(false);
-        return;
+        setBusy(false); return;
       }
 
-      // ── ASK LOCATION (sticky) ──
       if (phase === "askLocation") {
         if (isYes(text)) {
-          setEquip({ ubicacion: lastUbi });
+          setEquip({ ubicacion: lastUbi }); setBlockIdx(0); setPhase("equip");
           addBot(`**${lastUbi}**`);
-          setBlockIdx(0);
-          setPhase("equipSkipUbi");
-          setTimeout(() => addBot("Indique tipo de equipo y marca."), 400);
+          // Skip to block 1 if ubicacion was in block 0
+          if (BLOCKS[0].fields.includes("ubicacion")) {
+            // Check if block 0 has other pending fields
+            const otherFields = BLOCKS[0].fields.filter(f => f !== "ubicacion");
+            if (otherFields.length > 0) {
+              setTimeout(() => addBot(`Indique ${otherFields.map(f => FIELD_LABELS[f]).join(" y ")}.`), 300);
+            } else {
+              setBlockIdx(1);
+              setTimeout(() => askBlock(1), 300);
+            }
+          }
         } else {
-          setEquip({});
-          setBlockIdx(0);
-          setPhase("equip");
-          setTimeout(() => addBot(EQUIP_BLOCKS[0].ask), 400);
+          setEquip({}); setBlockIdx(0); setPhase("equip");
+          setTimeout(() => askBlock(0), 300);
         }
-        setBusy(false);
-        return;
+        setBusy(false); return;
       }
 
-      // ── FINAL REVIEW ──
       if (phase === "finalReview") {
         if (isYes(text)) {
           setPhase("sent");
-          addBot("**Levantamiento registrado.**\n\nSe registraron **" + allEquips.length + " equipo(s)** para el hospital " + (header.idHospital || "") + ".");
+          addBot(`**Levantamiento registrado.**\nSe registraron **${allEquips.length} equipo(s)** para ${header.idHospital || "el hospital"}.`);
         } else {
-          addBot("¿Desea agregar otro equipo o reiniciar el levantamiento?");
+          addBot("¿Desea agregar otro equipo o reiniciar?");
           setPhase("askMore");
         }
-        setBusy(false);
-        return;
+        setBusy(false); return;
       }
 
-      // ── HEADER BLOCK ──
+      // ── HEADER ──
       if (phase === "header") {
-        const fields = await extractFields(text, HEADER_BLOCK.extractPrompt, HEADER_BLOCK.keys);
-        if (fields) {
-          // Merge whatever we got
-          const merged = { ...header, ...fields };
-          // Remove empty strings from new fields only (keep previously filled)
-          HEADER_BLOCK.keys.forEach(k => {
-            if (fields[k]) merged[k] = fields[k];
-          });
+        const prompt = buildPrompt("header", 0, header, equip);
+        const res = await askClaude(prompt, text);
+        const parsed = parseJSON(res);
+
+        if (parsed && parsed.updates && Object.keys(parsed.updates).length > 0) {
+          const merged = { ...header };
+          Object.entries(parsed.updates).forEach(([k,v]) => { if (v) merged[k] = v; });
           setHeader(merged);
 
-          // Check what's still missing
           const missing = [];
           if (!merged.idHospital) missing.push("hospital");
           if (!merged.nombre) missing.push("nombre del responsable");
 
           if (missing.length > 0) {
-            const filled = formatExtracted(fields);
-            const filledMsg = filled ? filled + "\n\n" : "";
-            addBot(filledMsg + "Falta indicar: **" + missing.join("** y **") + "**.");
+            addBot(formatFields(parsed.updates) + "\n\nFalta: **" + missing.join("** y **") + "**.");
           } else {
-            addBot(formatExtracted(merged) + "\n\nDatos generales registrados. Proceda con el primer equipo.");
-            setPhase("equip");
-            setBlockIdx(0);
-            setEquip({});
-            setTimeout(() => addBot(EQUIP_BLOCKS[0].ask), 500);
+            addBot(formatFields(merged) + "\n\nDatos registrados. Proceda con el primer equipo.");
+            setPhase("equip"); setBlockIdx(0); setEquip({});
+            setTimeout(() => askBlock(0), 400);
           }
         } else {
-          addBot("No logré interpretar la respuesta. Puede indicar, por ejemplo: \"Hospital SEDENA, soy Alejandro Tamez González\"");
+          addBot(parsed?.message || "No logré interpretar. Indique hospital y nombre del responsable.");
         }
-        setBusy(false);
-        return;
+        setBusy(false); return;
       }
 
       // ── EQUIP BLOCKS ──
-      if (phase === "equip" || phase === "equipSkipUbi") {
-        const block = EQUIP_BLOCKS[blockIdx];
-        let prompt = block.extractPrompt;
+      if (phase === "equip") {
+        const prompt = buildPrompt("equip", blockIdx, header, equip);
+        const res = await askClaude(prompt, text);
+        const parsed = parseJSON(res);
 
-        // If skipping ubicacion (sticky), adjust block 0
-        if (phase === "equipSkipUbi" && blockIdx === 0) {
-          prompt = `Eres un asistente de captura de equipos médicos. Extrae del texto conversacional:
-- tipoEquipo: debe ser uno de [${CAT_TIPO.join(", ")}]. Normaliza sinónimos: "cauterio"→"ELECTROCAUTERIO", "monitor"→"MONITOR DE SIGNOS VITALES", etc.
-- marca: debe ser uno de [${CAT_MARCA.join(", ")}]. Normaliza errores ortográficos.
-Si no coincide con catálogo pon "OTRO". JSON puro sin backticks.`;
+        if (!parsed) {
+          addBot("No logré interpretar. " + BLOCKS[blockIdx].ask);
+          setBusy(false); return;
         }
 
-        const fields = await extractFields(text, prompt, block.keys);
+        let updated = { ...equip };
+        let hadUpdates = false;
+        let confirmMsg = "";
 
-        if (fields && Object.values(fields).filter(Boolean).length > 0) {
-          // Merge into equip
-          const updated = { ...equip, ...fields };
-          setEquip(updated);
-          addBot(formatExtracted(fields));
-
-          // Reset to normal equip phase
-          if (phase === "equipSkipUbi") setPhase("equip");
-
-          // Advance to next block
-          const nextBlock = blockIdx + 1;
-          if (nextBlock < EQUIP_BLOCKS.length) {
-            setBlockIdx(nextBlock);
-            setTimeout(() => addBot(EQUIP_BLOCKS[nextBlock].ask), 400);
+        // Apply corrections to header or equip
+        if (parsed.corrections && Object.keys(parsed.corrections).length > 0) {
+          if (parsed.correctionsTarget === "header") {
+            const newHeader = { ...header };
+            Object.entries(parsed.corrections).forEach(([k,v]) => { if (v) newHeader[k] = v; });
+            setHeader(newHeader);
+            confirmMsg += Object.entries(parsed.corrections).map(([k,v]) => `${FIELD_LABELS[k]||k} corregido: **${v}**`).join("\n") + "\n\n";
           } else {
-            // All blocks done → show full summary
+            Object.entries(parsed.corrections).forEach(([k,v]) => { if (v) { updated[k] = v; hadUpdates = true; } });
+            confirmMsg += Object.entries(parsed.corrections).map(([k,v]) => `${FIELD_LABELS[k]||k} corregido: **${v}**`).join("\n") + "\n\n";
+          }
+        }
+
+        // Apply block data
+        if (parsed.blockData && Object.keys(parsed.blockData).length > 0) {
+          Object.entries(parsed.blockData).forEach(([k,v]) => { if (v !== undefined) { updated[k] = v; hadUpdates = true; } });
+          confirmMsg += formatFields(parsed.blockData);
+        }
+
+        if (hadUpdates || confirmMsg) {
+          setEquip(updated);
+          addBot(confirmMsg || (parsed.message || "Datos registrados."));
+        }
+
+        // Check if current block is complete
+        const block = BLOCKS[blockIdx];
+        const blockComplete = block.fields.every(f => updated[f] !== undefined && updated[f] !== "");
+        // Also count "no data" as complete if at least one field was provided
+        const blockAttempted = block.fields.some(f => updated[f] !== undefined);
+
+        if (hadUpdates && blockAttempted) {
+          // Advance to next block
+          const next = blockIdx + 1;
+          if (next < BLOCKS.length) {
+            setBlockIdx(next);
+            setTimeout(() => askBlock(next), 400);
+          } else {
+            // All done
             setPhase("confirmEquip");
             setTimeout(() => addBot(equipSummary(updated) + "\n\n¿Confirma los datos?"), 400);
           }
-        } else {
-          addBot("No logré interpretar la respuesta. Indique los datos solicitados de forma natural.");
+        } else if (!hadUpdates) {
+          askBlock(blockIdx);
         }
-        setBusy(false);
-        return;
+
+        setBusy(false); return;
       }
 
     } catch (err) {
-      addBot("Error: " + (err.message || "intenta de nuevo"));
+      addBot("Error de procesamiento. Intente de nuevo.");
     }
     setBusy(false);
   };
 
-  const handleKey = (e) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); processInput(); }
+  // ── Handle correction in confirmEquip/correcting phase ──
+  const handleCorrection = async (text) => {
+    const lower = text.toLowerCase();
+    if (lower.includes("repetir") || lower.includes("reiniciar") || lower.includes("desde el inicio")) {
+      setEquip({}); setBlockIdx(0); setPhase("equip");
+      addBot("Equipo descartado. Ingrese de nuevo.");
+      setTimeout(() => askBlock(0), 400);
+      return;
+    }
+
+    const corrSys = `El usuario quiere corregir un dato de un equipo médico o del encabezado.
+
+DATOS ACTUALES DEL ENCABEZADO: ${JSON.stringify(header)}
+DATOS ACTUALES DEL EQUIPO: ${JSON.stringify(equip)}
+
+CATÁLOGOS:
+- ubicacion: ${CAT_UBICACION.join(", ")}
+- tipoEquipo: ${CAT_TIPO.join(", ")}
+- marca: ${CAT_MARCA.join(", ")}
+- propiedad: ${CAT_PROPIEDAD.join(", ")}
+- proveedor: ${CAT_PROVEEDOR.join(", ")}
+
+Responde JSON (sin backticks): {"target":"header"|"equip","campo":"clave","valor":"VALOR NORMALIZADO"}
+Si no identificas la corrección: {"target":"unclear"}`;
+
+    const res = await askClaude(corrSys, text);
+    const parsed = parseJSON(res);
+
+    if (parsed && parsed.target !== "unclear" && parsed.campo && parsed.valor) {
+      const label = FIELD_LABELS[parsed.campo] || parsed.campo;
+      if (parsed.target === "header") {
+        setHeader(p => ({ ...p, [parsed.campo]: parsed.valor }));
+      } else {
+        setEquip(p => ({ ...p, [parsed.campo]: parsed.valor }));
+      }
+      const updatedEquip = parsed.target === "equip" ? { ...equip, [parsed.campo]: parsed.valor } : equip;
+      addBot(`${label} actualizado: **${parsed.valor}**\n\n` + equipSummary(updatedEquip) + "\n\n¿Confirma los datos?");
+      setPhase("confirmEquip");
+    } else {
+      addBot("Indique qué campo corregir y su valor. Ejemplo: \"la marca es DRAGER\"");
+    }
   };
+
+  const handleKey = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); processInput(); } };
 
   const formatMsg = (text) => text.split("\n").map((line, i) => {
     let html = line.replace(/\*\*(.*?)\*\*/g, '<strong style="color:#F37021">$1</strong>');
-    html = html.replace(/^[•]\s*/g, '<span style="color:#F37021">▸ </span>');
     return <p key={i} style={{ margin: "2px 0", lineHeight: 1.55 }} dangerouslySetInnerHTML={{ __html: html }} />;
   });
 
-  // ── IDLE ──
+  // ── SCREENS ──
   if (phase === "idle") {
     return (
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "calc(100vh - 100px)", gap: 20 }}>
-        <img src="data:image/png;base64,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" alt="Biossmann" style={{ height: 36 }} />
-        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: "#4D4D4D", textAlign: "center" }}>
+      <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", height:"calc(100vh - 100px)", gap:20, padding:20 }}>
+        <img src={document.querySelector('header img, [alt=Biossmann]')?.src || ""} alt="" style={{ height:32, opacity: 0.7 }} />
+        <h2 style={{ margin:0, fontSize:20, fontWeight:700, color:"#4D4D4D", textAlign:"center" }}>
           Levantamiento de Equipamiento Quirúrgico
         </h2>
-        <p style={{ margin: 0, fontSize: 13, color: "#6B7280", textAlign: "center", maxWidth: 380, lineHeight: 1.6 }}>
+        <p style={{ margin:0, fontSize:13, color:"#6B7280", textAlign:"center", maxWidth:380, lineHeight:1.6 }}>
           Capture datos de equipos médicos mediante voz o texto. El sistema valida y normaliza la información contra catálogos institucionales.
         </p>
-        <button onClick={startNew} style={{ ...cs.btn, padding: "12px 28px", fontSize: 14, borderRadius: 8, marginTop: 8 }}>
+        <button onClick={startNew} style={{ ...cs.btn, padding:"12px 28px", fontSize:14, borderRadius:8, marginTop:8 }}>
           Iniciar Levantamiento
         </button>
       </div>
     );
   }
 
-  // ── SENT ──
   if (phase === "sent") {
     return (
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "calc(100vh - 100px)", gap: 16, padding: 20 }}>
-        <div style={{ width: 56, height: 56, borderRadius: 28, background: "#E8F5E9", display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", height:"calc(100vh - 100px)", gap:16, padding:20 }}>
+        <div style={{ width:56, height:56, borderRadius:28, background:"#E8F5E9", display:"flex", alignItems:"center", justifyContent:"center" }}>
           <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#2E7D32" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
         </div>
-        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: "#4D4D4D", textAlign: "center" }}>
-          Levantamiento Registrado
-        </h2>
-        <p style={{ margin: 0, fontSize: 13, color: "#6B7280", textAlign: "center" }}>
-          Hospital: {header.idHospital} — Responsable: {header.nombre} {header.apPaterno} {header.apMaterno}
+        <h2 style={{ margin:0, fontSize:20, fontWeight:700, color:"#4D4D4D" }}>Levantamiento Registrado</h2>
+        <p style={{ margin:0, fontSize:13, color:"#6B7280" }}>
+          Hospital: {header.idHospital} — {header.nombre} {header.apPaterno} {header.apMaterno}
         </p>
-        <p style={{ margin: 0, fontSize: 14, color: "#4D4D4D", fontWeight: 600 }}>
-          {allEquips.length} equipo(s) registrado(s)
-        </p>
-        <div style={{ marginTop: 8, maxWidth: 520, width: "100%", overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
-            <thead>
-              <tr style={{ borderBottom: "1px solid #E0E4EA" }}>
-                {["#", "Ubicación", "Tipo", "Marca", "Modelo", "Riesgo"].map((h) => (
-                  <th key={h} style={{ padding: "5px 7px", textAlign: "left", color: "#6B7280" }}>{h}</th>
-                ))}
+        <p style={{ margin:0, fontSize:14, color:"#4D4D4D", fontWeight:600 }}>{allEquips.length} equipo(s)</p>
+        <div style={{ marginTop:8, maxWidth:520, width:"100%", overflowX:"auto" }}>
+          <table style={{ width:"100%", borderCollapse:"collapse", fontSize:11 }}>
+            <thead><tr style={{ borderBottom:"1px solid #E0E4EA" }}>
+              {["#","Ubicación","Tipo","Marca","Modelo","Riesgo"].map(h => <th key={h} style={{ padding:"5px 7px", textAlign:"left", color:"#6B7280" }}>{h}</th>)}
+            </tr></thead>
+            <tbody>{allEquips.map((eq,i) => (
+              <tr key={i} style={{ borderBottom:"1px solid #E8EAED" }}>
+                <td style={{padding:"5px 7px"}}>{i+1}</td>
+                <td style={{padding:"5px 7px"}}>{eq.ubicacion}</td>
+                <td style={{padding:"5px 7px"}}>{eq.tipoEquipo}</td>
+                <td style={{padding:"5px 7px"}}>{eq.marca}</td>
+                <td style={{padding:"5px 7px"}}>{eq.modelo||"—"}</td>
+                <td style={{padding:"5px 7px"}}>{eq.riesgoCaract}/{eq.riesgoFunc}</td>
               </tr>
-            </thead>
-            <tbody>
-              {allEquips.map((eq, i) => (
-                <tr key={i} style={{ borderBottom: "1px solid #E8EAED" }}>
-                  <td style={{ padding: "5px 7px" }}>{i + 1}</td>
-                  <td style={{ padding: "5px 7px" }}>{eq.ubicacion}</td>
-                  <td style={{ padding: "5px 7px" }}>{eq.tipoEquipo}</td>
-                  <td style={{ padding: "5px 7px" }}>{eq.marca}</td>
-                  <td style={{ padding: "5px 7px" }}>{eq.modelo || "—"}</td>
-                  <td style={{ padding: "5px 7px" }}>{eq.riesgoCaract}/{eq.riesgoFunc}</td>
-                </tr>
-              ))}
-            </tbody>
+            ))}</tbody>
           </table>
         </div>
-        <button onClick={() => setPhase("idle")} style={{ ...cs.btn, padding: "12px 28px", fontSize: 14, borderRadius: 10, marginTop: 12 }}>
+        <button onClick={() => setPhase("idle")} style={{ ...cs.btn, padding:"12px 28px", fontSize:14, borderRadius:8, marginTop:12 }}>
           Nuevo Levantamiento
         </button>
       </div>
@@ -873,62 +786,52 @@ Si no coincide con catálogo pon "OTRO". JSON puro sin backticks.`;
   }
 
   // ── CHAT ──
-  const totalBlocks = EQUIP_BLOCKS.length;
-  const progressLabel = phase === "header" ? "Datos generales"
-    : (phase === "equip" || phase === "equipSkipUbi") ? `Equipo #${allEquips.length + 1} — Bloque ${blockIdx + 1}/${totalBlocks}`
-    : "";
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 100px)" }}>
+    <div style={{ display:"flex", flexDirection:"column", height:"calc(100vh - 100px)" }}>
       <style>{`
-        @keyframes pulse2 { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
-        @keyframes dotBlink { 0%,100% { opacity:.2; } 50% { opacity:1; } }
+        @keyframes pulse2{0%,100%{opacity:1}50%{opacity:0.4}}
+        @keyframes dotBlink{0%,100%{opacity:.2}50%{opacity:1}}
       `}</style>
 
-      <div style={{ flex: 1, overflow: "auto", padding: 12 }}>
-        {msgs.map((m, i) => (
-          <div key={i} style={{ display: "flex", justifyContent: m.from === "user" ? "flex-end" : "flex-start", marginBottom: 8 }}>
+      <div style={{ flex:1, overflow:"auto", padding:12 }}>
+        {msgs.map((m,i) => (
+          <div key={i} style={{ display:"flex", justifyContent:m.from==="user"?"flex-end":"flex-start", marginBottom:8 }}>
             <div style={{
-              maxWidth: "85%", padding: "10px 14px",
-              borderRadius: m.from === "user" ? "12px 12px 3px 12px" : "12px 12px 12px 3px",
-              background: m.from === "user" ? "#F37021" : "#F0F2F5",
-              color: m.from === "user" ? "#fff" : "#4D4D4D", fontSize: 13,
-              border: m.from === "user" ? "none" : "1px solid #2a3a4f",
+              maxWidth:"85%", padding:"10px 14px",
+              borderRadius: m.from==="user" ? "12px 12px 3px 12px" : "12px 12px 12px 3px",
+              background: m.from==="user" ? "#F37021" : "#F0F2F5",
+              color: m.from==="user" ? "#fff" : "#4D4D4D", fontSize:13,
+              border: m.from==="user" ? "none" : "1px solid #E0E4EA",
             }}>
-              {m.from === "bot" && (
-                <div style={{ fontSize: 9, fontWeight: 600, color: "#F37021", marginBottom: 4 }}>Sistema Biossmann</div>
-              )}
+              {m.from==="bot" && <div style={{ fontSize:9, fontWeight:600, color:"#F37021", marginBottom:4 }}>Sistema Biossmann</div>}
               <div>{formatMsg(m.text)}</div>
+              {m.riskTable && <RiskTable />}
             </div>
           </div>
         ))}
         {busy && (
-          <div style={{ display: "flex", marginBottom: 8 }}>
-            <div style={{ padding: "10px 14px", borderRadius: "12px 12px 12px 3px", background: "#fff", border: "1px solid #E0E4EA", display: "flex", gap: 5 }}>
-              {[0, 1, 2].map((j) => (
-                <span key={j} style={{ width: 6, height: 6, borderRadius: "50%", background: "#F37021", animation: `dotBlink 1.4s ${j * 0.2}s infinite` }} />
-              ))}
+          <div style={{ display:"flex", marginBottom:8 }}>
+            <div style={{ padding:"10px 14px", borderRadius:"12px 12px 12px 3px", background:"#F0F2F5", border:"1px solid #E0E4EA", display:"flex", gap:5 }}>
+              {[0,1,2].map(j => <span key={j} style={{ width:6, height:6, borderRadius:"50%", background:"#F37021", animation:`dotBlink 1.4s ${j*0.2}s infinite` }} />)}
             </div>
           </div>
         )}
         <div ref={endRef} />
       </div>
 
-      {/* Progress */}
-      {progressLabel && (
-        <div style={{ padding: "4px 12px", background: "#F0F2F5", borderTop: "1px solid #E0E4EA", fontSize: 10, color: "#6B7280", display: "flex", justifyContent: "space-between" }}>
-          <span>{progressLabel}</span>
-          {allEquips.length > 0 && <span style={{ color: "#2E7D32" }}>{allEquips.length} equipo(s) registrado(s)</span>}
+      {(phase==="header"||phase==="equip") && (
+        <div style={{ padding:"4px 12px", background:"#F0F2F5", borderTop:"1px solid #E0E4EA", fontSize:10, color:"#6B7280", display:"flex", justifyContent:"space-between" }}>
+          <span>{phase==="header" ? "Datos generales" : `Equipo #${allEquips.length+1} — Bloque ${blockIdx+1}/${BLOCKS.length}`}</span>
+          {allEquips.length > 0 && <span style={{ color:"#2E7D32" }}>{allEquips.length} registrado(s)</span>}
         </div>
       )}
 
-      {/* Input */}
-      <div style={{ padding: "8px 12px", borderTop: "1px solid #E0E4EA", background: "#F5F7FA" }}>
-        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+      <div style={{ padding:"8px 12px", borderTop:"1px solid #E0E4EA", background:"#fff" }}>
+        <div style={{ display:"flex", gap:6, alignItems:"center" }}>
           <button onClick={toggleVoice} style={{
-            width: 42, height: 42, borderRadius: "50%", border: "none",
+            width:42, height:42, borderRadius:"50%", border:"none",
             background: listening ? "#D84315" : "#F37021",
-            color: "#fff", fontSize: 18, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+            color:"#fff", fontSize:18, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0,
             boxShadow: listening ? "0 0 0 4px rgba(243,112,33,0.3)" : "none",
             animation: listening ? "pulse2 1s infinite" : "none",
           }}>
@@ -939,20 +842,17 @@ Si no coincide con catálogo pon "OTRO". JSON puro sin backticks.`;
             )}
           </button>
           <input
-            style={{ ...cs.inp, flex: 1 }}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
+            style={{ ...cs.inp, flex:1 }}
+            value={input} onChange={e => setInput(e.target.value)}
             onKeyDown={handleKey}
-            placeholder={listening ? "Escuchando..." : "Escribe tu respuesta..."}
+            placeholder={listening ? "Escuchando..." : "Escribe o dicta tu respuesta..."}
             disabled={busy || listening}
           />
           <button
-            style={{ ...cs.btn, padding: "9px 16px", opacity: (busy || !input.trim()) ? 0.5 : 1 }}
+            style={{ ...cs.btn, padding:"9px 16px", opacity:(busy||!input.trim())?0.5:1 }}
             onClick={() => processInput()}
             disabled={busy || !input.trim()}
-          >
-            Enviar
-          </button>
+          >Enviar</button>
         </div>
       </div>
     </div>
