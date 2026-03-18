@@ -219,7 +219,7 @@ function calcMetrics(data) {
 // ── API ──
 async function askClaude(sys, msg) {
   try {
-    const r = await fetch("/api/claude", {
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -260,27 +260,36 @@ const RISK_LABELS = {
 const HEADER_BLOCK = {
   ask: "Indique el hospital y el nombre del responsable del levantamiento.",
   keys: ["idHospital", "nombre", "apPaterno", "apMaterno"],
-  extractPrompt: `Eres un asistente de captura de datos hospitalarios. Extrae la información que el usuario proporcione de forma conversacional.
+  extractPrompt: `Eres un asistente de captura de datos hospitalarios en México. El usuario puede hablar por voz (con errores de dictado) o escribir informalmente.
 
 CAMPOS A EXTRAER (JSON puro sin backticks):
-- idHospital: ID numérico o nombre/siglas del hospital (SEDENA, IMSS, ISSSTE, Angeles, etc.)
+- idHospital: ID numérico o nombre/siglas del hospital
 - nombre: nombre(s) de pila del responsable
 - apPaterno: apellido paterno del responsable
-- apMaterno: apellido materno del responsable (puede estar vacío)
+- apMaterno: apellido materno del responsable (puede quedar vacío)
 
-EJEMPLOS de cómo el usuario puede hablar:
-- "Sedena, soy Alejandro Tamez González" → {"idHospital":"SEDENA","nombre":"ALEJANDRO","apPaterno":"TAMEZ","apMaterno":"GONZÁLEZ"}
+INSTITUCIONES COMUNES (corrige errores de voz):
+- "serena/sedena/Selena" → "SEDENA"
+- "imss/ims" → "IMSS"
+- "issste/iste" → "ISSSTE"
+- "angeles/ángeles" → "ANGELES"
+- "bienestar" → "IMSS BIENESTAR"
+
+EJEMPLOS:
+- "Serena Alejandro Tamez González" → {"idHospital":"SEDENA","nombre":"ALEJANDRO","apPaterno":"TAMEZ","apMaterno":"GONZÁLEZ"}
+- "Sedena yo soy el responsable soy alejandro Tamez González" → {"idHospital":"SEDENA","nombre":"ALEJANDRO","apPaterno":"TAMEZ","apMaterno":"GONZÁLEZ"}
 - "hospital 1596 el responsable es María López" → {"idHospital":"1596","nombre":"MARÍA","apPaterno":"LÓPEZ","apMaterno":""}
-- "Selena" → {"idHospital":"SELENA","nombre":"","apPaterno":"","apMaterno":""}
-- "yo soy el ingeniero Pedro Ruiz Flores" → {"idHospital":"","nombre":"PEDRO","apPaterno":"RUIZ","apMaterno":"FLORES"}
-- "1596, Nestor Galvez" → {"idHospital":"1596","nombre":"NESTOR","apPaterno":"GALVEZ","apMaterno":""}
+- "yo soy Pedro Ruiz" → {"idHospital":"","nombre":"PEDRO","apPaterno":"RUIZ","apMaterno":""}
+- "1596, Nestor Tobias Galvez Montes" → {"idHospital":"1596","nombre":"NESTOR TOBIAS","apPaterno":"GALVEZ","apMaterno":"MONTES"}
 
 REGLAS:
-- Extrae TODO lo que puedas inferir del texto, aunque no esté en formato estructurado
+- Extrae TODO lo que puedas inferir, aunque esté desordenado o informal
+- CORRIGE errores obvios de reconocimiento de voz (serena→SEDENA, etc.)
 - Los nombres van en MAYÚSCULAS
-- Si solo da un dato (hospital O nombre), extrae ese y deja los demás vacíos ""
+- Si la primera palabra parece institución/hospital seguida de un nombre de persona, separa correctamente
+- Si solo da un dato, extrae ese y deja los demás vacíos ""
 - Si dice "soy [nombre]", infiere que es el responsable
-- SIEMPRE devuelve JSON, incluso si solo tiene un campo lleno
+- SIEMPRE devuelve JSON válido
 - JSON puro, sin explicaciones, sin backticks.`
 };
 
@@ -482,6 +491,87 @@ function GuidedChat() {
     setBusy(true);
 
     try {
+      // ── UNIVERSAL CORRECTION DETECTION ──
+      // Before any phase logic, check if user is correcting a previous field
+      const lowerText = text.toLowerCase();
+      const isCorrectionPattern = /^(el |la |los |las )?(hospital|nombre|apellido|marca|modelo|tipo|ubicaci|proveed|riesgo|serie|manufactura|instalaci|servicio|accesorios|observaci)/i.test(lowerText) 
+        || /^(corrig|cambia|actualiza|modifica|no,? (es|era|el|la))/i.test(lowerText)
+        || (lowerText.includes(" es ") && !isYes(text) && phase !== "header");
+
+      if (isCorrectionPattern && phase !== "header" && phase !== "idle") {
+        const correctionSys = `El usuario quiere corregir un dato previamente capturado. Identifica qué campo corregir y el nuevo valor.
+
+CAMPOS DEL ENCABEZADO (header):
+- idHospital: hospital/ID hospital/clínica/SEDENA/IMSS/etc
+- nombre: nombre del responsable
+- apPaterno: apellido paterno
+- apMaterno: apellido materno
+
+CAMPOS DEL EQUIPO:
+- ubicacion: ubicación/quirófano/sala → normaliza a [${CAT_UBICACION.join(", ")}]
+- tipoEquipo: tipo de equipo → normaliza a [${CAT_TIPO.join(", ")}]
+- marca: marca → normaliza a [${CAT_MARCA.join(", ")}]
+- modelo: modelo
+- numSerie: número de serie
+- anioManufactura: año manufactura
+- anioInstalacion: año instalación
+- propiedad: propiedad → normaliza a [${CAT_PROPIEDAD.join(", ")}]
+- riesgoCaract: riesgo características (0-5)
+- riesgoFunc: riesgo funcionamiento (0-5)
+- fechaServicio: fecha último servicio
+- proveedor: proveedor → normaliza a [${CAT_PROVEEDOR.join(", ")}]
+- accesorios: accesorios
+- observaciones: observaciones
+
+IMPORTANTE: 
+- "el hospital es sedena" → {"target":"header","campo":"idHospital","valor":"SEDENA"}
+- "la marca es drager" → {"target":"equip","campo":"marca","valor":"DRAGER"}
+- "corrige el nombre, soy Pedro" → {"target":"header","campo":"nombre","valor":"PEDRO"}
+
+Responde SOLO JSON: {"target":"header"|"equip","campo":"clave","valor":"VALOR"}
+Si NO es una corrección, responde: {"target":"none"}`;
+
+        const corrRes = await askClaude(correctionSys, text);
+        try {
+          const match = corrRes.replace(/```json|```/g, "").trim().match(/\{[\s\S]*\}/);
+          if (match) {
+            const parsed = JSON.parse(match[0]);
+            if (parsed.target === "header" && parsed.campo && parsed.valor) {
+              const labels = { idHospital:"Hospital", nombre:"Nombre", apPaterno:"Ap. Paterno", apMaterno:"Ap. Materno" };
+              setHeader(p => ({ ...p, [parsed.campo]: parsed.valor }));
+              addBot(`${labels[parsed.campo] || parsed.campo} actualizado: **${parsed.valor}**`);
+              // Stay in current phase, re-ask current question if in equip
+              if (phase === "equip" || phase === "equipSkipUbi") {
+                const block = EQUIP_BLOCKS[blockIdx];
+                setTimeout(() => addBot(block.ask), 400);
+              }
+              setBusy(false);
+              return;
+            }
+            if (parsed.target === "equip" && parsed.campo && parsed.valor) {
+              const labels = {
+                ubicacion:"Ubicación", tipoEquipo:"Tipo", marca:"Marca", modelo:"Modelo",
+                numSerie:"No. Serie", anioManufactura:"Año Mfg", anioInstalacion:"Año Inst",
+                propiedad:"Propiedad", proveedor:"Proveedor",
+                riesgoCaract:"Riesgo Caract", riesgoFunc:"Riesgo Func", fechaServicio:"Últ. Servicio",
+                accesorios:"Accesorios", observaciones:"Observaciones"
+              };
+              setEquip(p => ({ ...p, [parsed.campo]: parsed.valor }));
+              addBot(`${labels[parsed.campo] || parsed.campo} actualizado: **${parsed.valor}**`);
+              if (phase === "equip" || phase === "equipSkipUbi") {
+                const block = EQUIP_BLOCKS[blockIdx];
+                setTimeout(() => addBot(block.ask), 400);
+              } else if (phase === "confirmEquip") {
+                const updated = { ...equip, [parsed.campo]: parsed.valor };
+                setTimeout(() => addBot(equipSummary(updated) + "\n\n¿Confirma los datos?"), 400);
+              }
+              setBusy(false);
+              return;
+            }
+            // If target is "none", fall through to normal phase processing
+          }
+        } catch (e) { /* fall through to normal processing */ }
+      }
       // ── CONFIRM EQUIP ──
       if (phase === "confirmEquip") {
         if (isYes(text)) {
